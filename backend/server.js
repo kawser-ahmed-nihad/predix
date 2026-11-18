@@ -22,16 +22,24 @@ async function main() {
 
   const app = Fastify({ logger: true, trustProxy: true });
 
-  const allowedOrigins = (process.env.FRONTEND_URL || "")
+  const allowedOrigins = (
+    process.env.FRONTEND_URL || "https://fancy-horse-cc256e.netlify.app"
+  )
     .split(",")
-    .map((url) => url.trim())
+    .map((s) => s.trim().replace(/\/+$/, ""))
     .filter(Boolean);
 
+  // local development (vite dev server)
+  if (process.env.NODE_ENV !== "production") {
+    allowedOrigins.push("http://localhost:5173", "http://127.0.0.1:5173");
+  }
+
   await app.register(cors, {
-    origin: true,
+    origin: allowedOrigins,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
   });
+  
   await app.register(jwt, { secret: process.env.JWT_SECRET });
 
   app.get("/health", async () => ({ ok: true }));
