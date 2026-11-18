@@ -22,8 +22,15 @@ async function main() {
 
   const app = Fastify({ logger: true, trustProxy: true });
 
+  const allowedOrigins = (process.env.FRONTEND_URL || "")
+    .split(",")
+    .map((url) => url.trim())
+    .filter(Boolean);
+
   await app.register(cors, {
-    origin: process.env.FRONTEND_URL ? process.env.FRONTEND_URL.split(",") : true,
+    origin: allowedOrigins.length ? allowedOrigins : true,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
   });
   await app.register(jwt, { secret: process.env.JWT_SECRET });
 
