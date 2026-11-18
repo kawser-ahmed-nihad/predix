@@ -1,5 +1,5 @@
 const { prisma } = require("../../Prisma/Db");
-const { fetchCurrentMatches } = require("../cricketApi");
+const { fetchMatches, fetchMatchInfo } = require("../cricketApi");
 
 const MIN = 60 * 1000;
 
@@ -25,6 +25,41 @@ function tournamentName(m) {
   // "India vs Australia, 1st T20I"  ->  "1st T20I"
   const part = String(m.name || "").split(",").slice(1).join(",").trim();
   return part || (m.matchType ? String(m.matchType).toUpperCase() : null);
+}
+
+// Finals / play-offs often have "Tbc vs Tbc" until the teams are known.
+const isPlaceholder = (name) => /^(tbc|tbd|to be (confirmed|decided))\b/i.test(String(name || "").trim());
+
+// "Bangladesh won by 5 wickets"  ->  "Bangladesh"
+function winnerFromStatus(m) {
+  const s = String(m.status || "").toLowerCase();
+  return (m.teams || []).find((t) => s.startsWith(`${String(t).toLowerCase()} won`)) || null;
+}
+
+// Find the market option that equals `value` (ignoring upper/lower case).
+function matchOption(options, value) {
+  if (!value) return null;
+  const v = String(value).trim().toLowerCase();
+  return options.find((o) => String(o).trim().toLowerCase() === v) || null;
+}
+
+// match_info costs one API hit, so it is cached and tried at most 3 times
+// per match and state (live / finished).
+const infoCache = new Map();
+async function getInfo(match) {
+  if (!match.externalId) return null; // hand-made match, no API data
+  const key = `${match.id}:${match.status}`;
+  const c = infoCache.get(key) || { info: null, tries: 0 };
+  if (c.info) return c.info;
+  if (c.tries >= 3) return null;
+  c.tries++;
+  infoCache.set(key, c);
+  try {
+    c.info = await fetchMatchInfo(match.externalId);
+  } catch (e) {
+    console.warn(`[sync] match_info failed for match ${match.id}: ${e.message}`);
+  }
+  return c.info;
 }
 
 // ---------- market creation ----------
@@ -95,22 +130,31 @@ async function resolveMarkets(match, apiMatch) {
 
   for (const mk of markets) {
     const options = Array.isArray(mk.options) ? mk.options : [];
-    let result = null;
+    let raw = null;
     let mustSettle = false; // true = if we have no valid result, cancel (refund)
 
     if (mk.type === "TOSS") {
-      result = apiMatch.tossWinner || null;
+      // the toss is known as soon as the match has started
+      if (match.status !== "UPCOMING") {
+        raw = apiMatch.tossWinner || (await getInfo(match))?.tossWinner || null;
+      }
       mustSettle = match.status === "FINISHED";
     } else if (mk.type === "WINNER") {
       if (match.status === "FINISHED") {
-        result = apiMatch.matchWinner || null;
+        raw =
+          apiMatch.matchWinner ||
+          winnerFromStatus(apiMatch) ||
+          (await getInfo(match))?.matchWinner ||
+          null;
         mustSettle = true;
       }
     } else {
       continue; // other types are resolved manually by an admin
     }
 
-    if (result && options.includes(result)) {
+    const result = matchOption(options, raw);
+
+    if (result) {
       await prisma.market.update({
         where: { id: mk.id },
         data: { status: "RESOLVED", result },
@@ -119,7 +163,7 @@ async function resolveMarkets(match, apiMatch) {
       // tie / no result / name mismatch -> cancel so predictions get refunded
       console.warn(
         `[sync] market ${mk.id} (${mk.type}) cancelled: no valid result`,
-        { result, options }
+        { raw, options, status: apiMatch.status }
       );
       await prisma.market.update({
         where: { id: mk.id },
@@ -137,13 +181,18 @@ async function syncMatches(log = console) {
   if (running) return { skipped: true };
   running = true;
   try {
-    const { matches, usedToday } = await fetchCurrentMatches();
+    const { matches, usedToday } = await fetchMatches(0);
     let created = 0;
     let updated = 0;
+    let placeholders = 0;
 
     for (const m of matches) {
       const teams = m.teams;
       if (!Array.isArray(teams) || teams.length !== 2) continue;
+      if (isPlaceholder(teams[0]) || isPlaceholder(teams[1])) {
+        placeholders++;
+        continue;
+      }
       const startTime = parseGmt(m.dateTimeGMT);
       if (!startTime || !m.id) continue;
 
@@ -160,7 +209,7 @@ async function syncMatches(log = console) {
         teamBLogo: logoOf(teams[1]),
         startTime,
         status,
-        winner: m.matchWinner || null,
+        winner: m.matchWinner || winnerFromStatus(m) || null,
       };
 
       const existing = await prisma.match.findUnique({
@@ -199,8 +248,9 @@ async function syncMatches(log = console) {
       await resolveMarkets(match, m);
     }
 
-    log.info?.({ created, updated, usedToday }, "match sync done");
-    return { created, updated, usedToday };
+    const stats = { fetched: matches.length, created, updated, placeholders, usedToday };
+    log.info?.(stats, "match sync done");
+    return stats;
   } finally {
     running = false;
   }

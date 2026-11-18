@@ -11,7 +11,7 @@ const DAILY_LIMIT = Number(process.env.CRICKET_DAILY_LIMIT || 90);
 const today = () => new Date().toISOString().slice(0, 10);
 let usage = { day: today(), count: 0 };
 
-async function fetchCurrentMatches() {
+async function call(path, params = {}) {
   const key = process.env.CRICKET_API_KEY;
   if (!key) throw new Error("CRICKET_API_KEY is missing");
 
@@ -21,7 +21,8 @@ async function fetchCurrentMatches() {
   }
   usage.count++;
 
-  const res = await fetch(`${BASE}/currentMatches?apikey=${key}&offset=0`, {
+  const qs = new URLSearchParams({ apikey: key, ...params });
+  const res = await fetch(`${BASE}/${path}?${qs}`, {
     signal: AbortSignal.timeout(10000),
   });
   if (!res.ok) throw new Error(`cricket api http ${res.status}`);
@@ -30,7 +31,20 @@ async function fetchCurrentMatches() {
   if (json.status !== "success") {
     throw new Error(`cricket api error: ${json.reason || json.status}`);
   }
-  return { matches: json.data || [], info: json.info, usedToday: usage.count };
+  return json;
 }
 
-module.exports = { fetchCurrentMatches };
+// The "matches" list contains finished AND upcoming matches (25 per page).
+// ("currentMatches" only has live / just-finished ones, so it is not enough.)
+async function fetchMatches(offset = 0) {
+  const json = await call("matches", { offset });
+  return { matches: json.data || [], usedToday: usage.count };
+}
+
+// One match in detail (toss winner, match winner ...). Costs 1 hit.
+async function fetchMatchInfo(id) {
+  const json = await call("match_info", { id });
+  return json.data || null;
+}
+
+module.exports = { fetchMatches, fetchMatchInfo };
