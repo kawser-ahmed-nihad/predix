@@ -28,7 +28,7 @@ async function main() {
     .filter(Boolean);
 
   await app.register(cors, {
-    origin: allowedOrigins.length ? allowedOrigins : true,
+    origin: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
   });
